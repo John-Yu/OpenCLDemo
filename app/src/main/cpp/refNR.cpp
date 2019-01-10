@@ -143,8 +143,8 @@ void refNR(unsigned char *bufIn, unsigned char *bufOut, int *info) {
         }
     }
 
-    delete srcPixels;
-    delete dstPixels;
+    delete [] srcPixels;
+    delete [] dstPixels;
 
     return;
 }
