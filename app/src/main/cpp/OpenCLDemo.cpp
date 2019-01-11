@@ -38,9 +38,10 @@
 
 #include "refNR.h"
 #include "openCLNR.h"
+#include "openCLGEMM.h"
 
-extern "C" jint
-Java_com_cscao_apps_opencldemo_OpenCLActivity_runOpenCL(JNIEnv *env, jclass clazz, jobject bitmapIn,
+extern "C" {
+jint Java_com_cscao_apps_opencldemo_OpenCLActivity_runOpenCL(JNIEnv *env, jclass clazz, jobject bitmapIn,
                                                         jobject bitmapOut, jintArray info) {
 
     void *bi;
@@ -60,12 +61,29 @@ Java_com_cscao_apps_opencldemo_OpenCLActivity_runOpenCL(JNIEnv *env, jclass claz
     return 0;
 }
 
+jint Java_com_cscao_apps_opencldemo_OpenCLActivity_runOpenCLGEMM(JNIEnv *env, jclass clazz, jobject bitmapIn,
+                                                             jobject bitmapOut, jintArray info) {
 
+    void *bi;
+    void *bo;
 
-extern "C" jint
-Java_com_cscao_apps_opencldemo_OpenCLActivity_runNativeC(JNIEnv *env, jclass clazz,
-                                                         jobject bitmapIn, jobject bitmapOut,
-                                                         jintArray info) {
+    jint *i = env->GetIntArrayElements(info, NULL);
+
+    AndroidBitmap_lockPixels(env, bitmapIn, &bi);
+    AndroidBitmap_lockPixels(env, bitmapOut, &bo);
+
+    openCLGEMM((unsigned char *) bi, (unsigned char *) bo, (int *) i);
+
+    AndroidBitmap_unlockPixels(env, bitmapIn);
+    AndroidBitmap_unlockPixels(env, bitmapOut);
+    env->ReleaseIntArrayElements(info, i, 0);
+
+    return 0;
+}
+
+jint Java_com_cscao_apps_opencldemo_OpenCLActivity_runNativeC(JNIEnv *env, jclass clazz,
+                                                              jobject bitmapIn, jobject bitmapOut,
+                                                              jintArray info) {
     void *bi;
     void *bo;
 
@@ -81,4 +99,6 @@ Java_com_cscao_apps_opencldemo_OpenCLActivity_runNativeC(JNIEnv *env, jclass cla
     env->ReleaseIntArrayElements(info, i, 0);
 
     return 0;
+}
+
 }

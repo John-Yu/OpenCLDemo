@@ -73,7 +73,7 @@ public class OpenCLActivity extends Activity {
         }
     }
 
-    static boolean hasFoundLibrary = true;
+    private static boolean hasFoundLibrary = true;
 
     static {
         try {
@@ -84,7 +84,7 @@ public class OpenCLActivity extends Activity {
     }
 
     public static native int runOpenCL(Bitmap bmpIn, Bitmap bmpOut, int info[]);
-
+    public static native int runOpenCLGEMM(Bitmap bmpIn, Bitmap bmpOut, int info[]);
     public static native int runNativeC(Bitmap bmpIn, Bitmap bmpOut, int info[]);
 
     final int info[] = new int[3]; // Width, Height, Execution time (ms)
@@ -131,6 +131,13 @@ public class OpenCLActivity extends Activity {
         runNativeC(bmpOrig, bmpNativeC, info);
         textView.setText(String.format(Locale.US, "%s %d ms",
                 getString(R.string.native_time_str), info[2]));
+        imageView.setImageBitmap(bmpNativeC);
+    }
+    public void showOpenCLGEMMImage(View v) {
+        info[2] = 0;
+        runOpenCLGEMM(bmpOrig, bmpNativeC, info);
+        textView.setText(String.format(Locale.US, "%s %d ms",
+                getString(R.string.gemm_time_str), info[2]));
         imageView.setImageBitmap(bmpNativeC);
     }
 }
