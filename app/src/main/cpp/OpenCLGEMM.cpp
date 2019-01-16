@@ -1,12 +1,171 @@
 #define __CL_ENABLE_EXCEPTIONS
 #include "openCLGEMM.h"
+#include <cstdio>
+#include <chrono>
+#include <vector>
+#include <string>
 
 static const std::string kernelSource =
 #include "gemm_8x4.opencl"
 ;
 
+static size_t ceilMultiple(size_t a, size_t b)
+{
+    if (a % b == 0) {
+        return a;
+    }
+
+    auto ret = a + (b - a % b);
+    return ret;
+}
+
+static void cblas_sgemm(const bool isRowMajor, const bool isTRANSA, const bool isTRANSB, const size_t M, const size_t N, const size_t K, const float *A,
+                        const size_t LDA, const float *B, const size_t LDB, float *C, const size_t LDC)
+{
+    const auto k_ceil = ceilMultiple(K, 4);
+    const auto n_ceil = ceilMultiple(N, 4);
+    const auto A_vm_size =  M  * k_ceil * sizeof(float);
+    const auto B_vm_size =  n_ceil  * k_ceil * sizeof(float);
+    const auto C_vm_size =  M  * n_ceil * sizeof(float);
+
+    auto A_zeros = std::vector<float>(A_vm_size);
+    auto B_zeros = std::vector<float>(B_vm_size);
+    auto C_zeros = std::vector<float>(C_vm_size);
+    //ZeroPad A
+    for(auto row = 0; row< M; row++)
+        for(auto col =0; col < K; col++)
+        {
+            auto i = row * k_ceil + col;
+            auto j = row * LDA + col;
+            if((isRowMajor && isTRANSA) || (!isRowMajor && !isTRANSA)) {
+                    j = col * LDA + row;
+            }
+            A_zeros[i] = A[j];
+        }
+        //ZeroPad B
+    for(auto row = 0; row< K; row++)
+        for(auto col =0; col < N; col++)
+        {
+            auto i = row * n_ceil + col;
+            auto j = row * LDB + col;
+            if((isRowMajor && isTRANSB) || (!isRowMajor && !isTRANSB)) {
+                j = col * LDB + row;
+            }
+            B_zeros[i] = B[j];
+        }
+    // C =  A x B
+    cl_int err = CL_SUCCESS;
+    try {
+
+        std::vector<cl::Platform> platforms;
+        cl::Platform::get(&platforms);
+        if (platforms.size() == 0) {
+            std::cout << "Platform size 0\n";
+            return;
+        }
+
+        cl_context_properties properties[] =
+                {CL_CONTEXT_PLATFORM, (cl_context_properties) (platforms[0])(), 0};
+        cl::Context context(CL_DEVICE_TYPE_GPU, properties);
+
+        std::vector<cl::Device> devices = context.getInfo<CL_CONTEXT_DEVICES>();
+        cl::CommandQueue queue(context, devices[0], 0, &err);
+
+        cl::Program::Sources source(1, std::make_pair(kernelSource.c_str(),
+                                                      kernelSource.length() + 1));
+        cl::Program program(context, source);
+        const char *options = "-cl-fast-relaxed-math";
+        program.build(devices, options);
+
+        cl::Kernel kernel(program, "matmul_8x4_blocks", &err);
+
+        cl::Buffer bufferIn = cl::Buffer(context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                                         A_vm_size, (void *) A_zeros.data(), &err);
+        cl::Buffer bufferOut = cl::Buffer(context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR,
+                                          C_vm_size, (void *) C_zeros.data(), &err);
+        //CL_RGBA has 4 color channles, so use (width / 4)
+        cl::Image2D img = cl::Image2D(context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                                      cl::ImageFormat(CL_RGBA, CL_FLOAT), n_ceil / 4, k_ceil,
+                                      0, (void *)B_zeros.data());
+
+        kernel.setArg(0, bufferIn);  //A
+        kernel.setArg(1, k_ceil); //lda
+        kernel.setArg(2, bufferOut); //C
+        kernel.setArg(3, n_ceil); //ldc
+        kernel.setArg(4, M);
+        kernel.setArg(5, n_ceil);
+        kernel.setArg(6, k_ceil);
+        kernel.setArg(7, img); //B
+
+        cl::Event event;
+
+        clock_t startTimer1, stopTimer1;
+        startTimer1 = clock();
+
+        queue.enqueueNDRangeKernel(kernel,
+                                   cl::NullRange,
+                                   cl::NDRange(n_ceil/4, (M+7)/8),     //be careful
+                                   cl::NullRange,
+                                   NULL,
+                                   &event);
+
+
+        queue.finish();
+
+        stopTimer1 = clock();
+        double elapse = 1000.0 * (double) (stopTimer1 - startTimer1) / (double) CLOCKS_PER_SEC;
+        LOGI("OpenCL code on the GPU took %g ms\n\n", elapse);
+
+        queue.enqueueReadBuffer(bufferOut, CL_TRUE, 0, C_vm_size, (void *) C_zeros.data());
+        for(auto row = 0; row< M; row++)
+            for(auto col =0; col < N; col++)
+            {
+                auto i = row * n_ceil + col;
+                auto j = row * LDC + col;
+                if(!isRowMajor) {
+                    j = col * LDC + row;
+                }
+                C[j]= C_zeros[i] ;
+            }
+    }
+    catch (cl::Error err) {
+        LOGE("ERROR: %s\n", err.what());
+    }
+}
+static void openCLGEMM_test1()
+{
+    // Example SGEMM arguments
+    const size_t m = 224;
+    const size_t n = 25;
+    const size_t k = 224;
+    auto a_ld = k;
+    const auto b_ld = n;
+    const auto c_ld = n;
+
+    // Populate host matrices with some example data
+    auto host_a = std::vector<float>(m*k);
+    auto host_b = std::vector<float>(n*k);
+    auto host_c = std::vector<float>(m*n);
+    //for (auto &item: host_a) { item = 1.0f; }
+    //isRowMajor
+    for(auto i = 0; i< m; i++)
+        for(auto j =0; j<k; j++)
+            host_a[i*k+j] = (i+1) * 1.0f;
+    for (auto &item: host_b) { item = 2.0f; }
+    for (auto &item: host_c) { item = 0.0f; }
+    cblas_sgemm(true, false, false, m, n, k, host_a.data(), a_ld, host_b.data(), b_ld, host_c.data(), c_ld);
+    //isTRANSA == true
+    for(auto i = 0; i< m; i++)
+        for(auto j =0; j<k; j++)
+            host_a[i+j*m] = (i+1) * 1.0f;
+
+    for (auto &item: host_c) { item = 0.0f; }
+    a_ld = m; //
+    cblas_sgemm(true, true, false, m, n, k, host_a.data(), a_ld, host_b.data(), b_ld, host_c.data(), c_ld);
+
+}
 //test
-void openCLGEMM_test(unsigned char *bufIn, unsigned char *bufOut, int *info) {
+static void openCLGEMM_test(unsigned char *bufIn, unsigned char *bufOut, int *info) {
 
     LOGI("\n\nStart openCLGEMM (i.e., OpenCL on the GPU)");
 
@@ -96,6 +255,8 @@ void openCLGEMM_test(unsigned char *bufIn, unsigned char *bufOut, int *info) {
 void openCLGEMM(unsigned char *bufIn, unsigned char *bufOut, int *info) {
 
     LOGI("\n\nStart openCLGEMM (i.e., OpenCL on the GPU)");
+    openCLGEMM_test1();
+    return;
 
     int width = info[0];
     int height = info[1];
