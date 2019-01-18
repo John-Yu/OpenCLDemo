@@ -5,9 +5,58 @@
 #include <vector>
 #include <string>
 
+#include <qml.h>
+
 static const std::string kernelSource =
 #include "gemm_8x4.opencl"
 ;
+
+class COpen_CL {
+public:
+    cl::Context  m_context;
+    cl::CommandQueue  m_queue;
+    cl::Kernel  m_kernel;
+    bool isReady;
+    COpen_CL() { isReady = false;}
+    void init();
+};
+void COpen_CL::init()
+{
+    // init only once
+    if(isReady) return ;
+    cl_int err = CL_SUCCESS;
+    try {
+        std::vector<cl::Platform> platforms;
+        cl::Platform::get(&platforms);
+        if (platforms.size() == 0) {
+            std::cout << "Platform size 0\n";
+            return;
+        }
+
+        cl_context_properties properties[] =
+                {CL_CONTEXT_PLATFORM, (cl_context_properties) (platforms[0])(), 0};
+        m_context = cl::Context(CL_DEVICE_TYPE_GPU, properties);
+
+        std::vector<cl::Device> devices = m_context.getInfo<CL_CONTEXT_DEVICES>();
+        m_queue = cl::CommandQueue(m_context, devices[0], 0, &err);
+        if(err != CL_SUCCESS) return;
+
+        cl::Program::Sources source(1, std::make_pair(kernelSource.c_str(),
+                                                      kernelSource.length() + 1));
+        cl::Program program(m_context, source);
+        const char *options = "-cl-fast-relaxed-math";
+        program.build(devices, options);
+
+        m_kernel = cl::Kernel(program, "matmul_8x4_blocks", &err);
+        if(err != CL_SUCCESS) return;
+        isReady = true;
+    }
+    catch (cl::Error err) {
+        LOGE("ERROR: %s\n", err.what());
+    }
+}
+
+COpen_CL g_open_cl;
 
 static size_t ceilMultiple(size_t a, size_t b)
 {
@@ -19,9 +68,10 @@ static size_t ceilMultiple(size_t a, size_t b)
     return ret;
 }
 
-static void cblas_sgemm(const bool isRowMajor, const bool isTRANSA, const bool isTRANSB, const size_t M, const size_t N, const size_t K, const float *A,
+static void cl_cblas_sgemm(const bool isRowMajor, const bool isTRANSA, const bool isTRANSB, const size_t M, const size_t N, const size_t K, const float *A,
                         const size_t LDA, const float *B, const size_t LDB, float *C, const size_t LDC)
 {
+    if(!g_open_cl.isReady) return ;
     const auto k_ceil = ceilMultiple(K, 4);
     const auto n_ceil = ceilMultiple(N, 4);
     const auto A_vm_size =  M  * k_ceil * sizeof(float);
@@ -56,7 +106,7 @@ static void cblas_sgemm(const bool isRowMajor, const bool isTRANSA, const bool i
     // C =  A x B
     cl_int err = CL_SUCCESS;
     try {
-
+/*
         std::vector<cl::Platform> platforms;
         cl::Platform::get(&platforms);
         if (platforms.size() == 0) {
@@ -78,6 +128,10 @@ static void cblas_sgemm(const bool isRowMajor, const bool isTRANSA, const bool i
         program.build(devices, options);
 
         cl::Kernel kernel(program, "matmul_8x4_blocks", &err);
+*/
+        cl::Context & context = g_open_cl.m_context;
+        cl::Kernel & kernel = g_open_cl.m_kernel;
+        cl::CommandQueue & queue = g_open_cl.m_queue;
 
         cl::Buffer bufferIn = cl::Buffer(context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
                                          A_vm_size, (void *) A_zeros.data(), &err);
@@ -99,9 +153,6 @@ static void cblas_sgemm(const bool isRowMajor, const bool isTRANSA, const bool i
 
         cl::Event event;
 
-        clock_t startTimer1, stopTimer1;
-        startTimer1 = clock();
-
         queue.enqueueNDRangeKernel(kernel,
                                    cl::NullRange,
                                    cl::NDRange(n_ceil/4, (M+7)/8),     //be careful
@@ -109,14 +160,9 @@ static void cblas_sgemm(const bool isRowMajor, const bool isTRANSA, const bool i
                                    NULL,
                                    &event);
 
-
+        queue.enqueueReadBuffer(bufferOut, CL_TRUE, 0, C_vm_size, (void *) C_zeros.data());
         queue.finish();
 
-        stopTimer1 = clock();
-        double elapse = 1000.0 * (double) (stopTimer1 - startTimer1) / (double) CLOCKS_PER_SEC;
-        LOGI("OpenCL code on the GPU took %g ms\n\n", elapse);
-
-        queue.enqueueReadBuffer(bufferOut, CL_TRUE, 0, C_vm_size, (void *) C_zeros.data());
         for(auto row = 0; row< M; row++)
             for(auto col =0; col < N; col++)
             {
@@ -153,7 +199,28 @@ static void openCLGEMM_test1()
             host_a[i*k+j] = (i+1) * 1.0f;
     for (auto &item: host_b) { item = 2.0f; }
     for (auto &item: host_c) { item = 0.0f; }
-    cblas_sgemm(true, false, false, m, n, k, host_a.data(), a_ld, host_b.data(), b_ld, host_c.data(), c_ld);
+    g_open_cl.init();
+/*
+    // Start the timer
+    auto start_time = std::chrono::steady_clock::now();
+    for(auto i=0;i<36;i++)
+        cl_cblas_sgemm(true, false, false, m, n, k, host_a.data(), a_ld, host_b.data(), b_ld, host_c.data(), c_ld);
+    auto elapsed_time = std::chrono::steady_clock::now() - start_time;
+    auto time_ms = std::chrono::duration<double,std::milli>(elapsed_time).count();
+    LOGI("OpenCL code on the GPU took %.3lf ms\n\n", time_ms);
+*/
+    //for (auto &item: host_c) { item = 0.0f; }
+    {
+        // Start the timer
+        auto start_time = std::chrono::steady_clock::now();
+        for(auto i=0;i<36;i++)
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, m, n, k, 1.0, host_a.data(), a_ld, host_b.data(), b_ld, 0.0, host_c.data(), c_ld);
+        auto elapsed_time = std::chrono::steady_clock::now() - start_time;
+        auto time_ms = std::chrono::duration<double,std::milli>(elapsed_time).count();
+        LOGI("QML cblas_sgemm() took %.3lf ms\n\n", time_ms);
+
+    }
+
     //isTRANSA == true
     for(auto i = 0; i< m; i++)
         for(auto j =0; j<k; j++)
@@ -161,7 +228,7 @@ static void openCLGEMM_test1()
 
     for (auto &item: host_c) { item = 0.0f; }
     a_ld = m; //
-    cblas_sgemm(true, true, false, m, n, k, host_a.data(), a_ld, host_b.data(), b_ld, host_c.data(), c_ld);
+    cl_cblas_sgemm(true, true, false, m, n, k, host_a.data(), a_ld, host_b.data(), b_ld, host_c.data(), c_ld);
 
 }
 //test
